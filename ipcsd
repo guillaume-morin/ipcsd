@@ -1,0 +1,778 @@
+#!/usr/bin/perl -w
+
+#
+# IPCSD - IP Change Survey Daemon 
+#
+# See README for informations or type ./ipcsd --help
+#
+
+# ----------------
+# |  FUNCTIONS   |
+# | load_default |
+# |              |
+# ----------------
+
+sub load_default() {
+
+# global vars
+$VERSION="0.1.7";
+$PROGNAME="ipcsd";
+
+# config vars
+$CONFIG_FILE = "/etc/$PROGNAME.conf";
+
+$INTERFACE = "ppp0";
+$IF_DOWN="c"; # Values are "c" for continue , "r" for reconnect and "s" for stop
+$RECONNECT_COMMAND=""; 
+$IFCONFIG_OUTPUT_PATTERN = "inet add?r:(\\d{1,3}\.\\d{1,3}\.\\d{1,3}\.\\d{1,3})";
+
+$INTERVAL = "5";
+$LONG_INTERVAL = "900";
+$RECONNECT_INTERVAL="30"; 
+
+$TEMPLATE = "";
+$REPLACE_PATTERN = "";
+$TARGET_FILE = "";
+
+$PRE_CHANGE_COMMAND = "";
+$POST_CHANGE_COMMAND = "";
+
+$PATH_TO_IFCONFIG = "/sbin/ifconfig";
+$PATH_TO_SLEEP = "/bin/sleep";
+
+$TMP_FILE = "/tmp/$PROGNAME";
+
+$CHANGE_MODE="c"; 
+# Values are : 
+# "c" : Create new file TARGET_FILE with TEMPLATE and regex it by replacing REPLACE_PATTERN by new IP
+# "r" : Replace all occurence of $old_ip in TARGET_FILE by $new_ip
+# "m" : Modify TARGET_FILE by replacing REPLACE_PATTERN by the new IP
+#       I don't know if it can be useful
+
+# mode vars
+$mode_stop=0;
+$mode_version=0;
+$mode_help=0;
+$mode_verbose=0;
+$mode_gen=0; # generate a default config file
+
+
+# da magic iterator
+$i=0; 
+
+}
+
+
+# -------------
+# | FUNCTIONS |
+# |   init    |
+# |           |
+# -------------
+
+sub init() {
+
+# check if the command line contains "-c" or --config-file
+$i=0;
+while ($ARGV[$i]) { 
+  SWITCH: {      # a bit grouik
+      if ($ARGV[$i] =~ /^-c$|^--config-file$/) {
+	  if ($ARGV[$i+1]) {
+	      $CONFIG_FILE=$ARGV[$i+1];
+	  }
+	  else {
+	      print "$ARGV[$i] : you must specify an argument\n";
+	      $mode_help=1;
+	  }
+	  $i++;
+	  last SWITCH;
+      }
+  }
+    $i++;
+}
+
+
+# open config file
+if (-e $CONFIG_FILE) {
+    unless (open (CONFIG_FILE,$CONFIG_FILE)) {
+	print "cannot open $CONFIG_FILE for reading";
+	$mode_stop=1;
+    }
+    
+# set up parameters
+    while (<CONFIG_FILE>) {
+	unless (/^#|^\s*$/) {
+	      SWITCH: {
+		  if ( /^INTERFACE=\"(\w+)\"$/ ) {
+		      $INTERFACE=$1;
+		      last SWITCH;
+		  }
+		  if ( /^IF_DOWN=\"(\w)\"$/ ) {
+		      $IF_DOWN=$1;
+		      last SWITCH;
+		  }
+		  if ( /^RECONNECT_COMMAND=\"(.*)\"$/ ) {
+		      $RECONNECT_COMMAND=$1;
+		      last SWITCH;
+		  }
+		  if ( /^IFCONFIG_OUTPUT_PATTERN=\"(.*)\"$/ ) {
+		      $IFCONFIG_OUTPUT_PATTERN=$1;
+		      last SWITCH;
+		  }
+
+		  if ( /^INTERVAL=\"(\w+)\"$/ ) {
+		      $INTERVAL=$1;
+		      last SWITCH;
+		  }
+		  if ( /^LONG_INTERVAL=\"(\w+)\"$/ ) {
+		      $LONG_INTERVAL=$1;
+		      last SWITCH;
+		  }
+		  if ( /^RECONNECT_INTERVAL=\"(\w+)\"$/ ) {
+		      $RECONNECT_INTERVAL=$1;
+		      last SWITCH;
+		  }
+
+
+		  if ( /^REPLACE_PATTERN=\"(.*)\"$/ ) {
+		      $REPLACE_PATTERN=$1;
+		      last SWITCH;
+		  }
+		  if ( /^TEMPLATE=\"(.*)\"$/ ) {
+		      $TEMPLATE=$1;
+		      last SWITCH;
+		  }
+		  if ( /^TARGET_FILE=\"(.*)\"$/ ) {
+		      $TARGET_FILE=$1;
+		      last SWITCH;
+		  }
+
+		  if ( /^PRE_CHANGE_COMMAND=\"(.*)\"$/ ) {
+		      $PRE_CHANGE_COMMAND=$1;
+		      last SWITCH;
+		  }
+		  if ( /^POST_CHANGE_COMMAND=\"(.*)\"$/ ) {
+		      $POST_CHANGE_COMMAND=$1;
+		      last SWITCH;
+		  }
+
+		  if ( /^PATH_TO_IFCONFIG=\"(.*)\"$/ ) {
+		      $PATH_TO_IFCONFIG=$1;
+		      last SWITCH;
+		  }
+		  if ( /^PATH_TO_SLEEP=\"(.*)\"$/ ) {
+		      $PATH_TO_SLEEP=$1;
+		      last SWITCH;
+		  }
+
+		  if ( /^TMP_FILE=\"(.+)\"$/ ) {
+		      $TMP_FILE=$1;
+		      last SWITCH;
+		  }
+
+		  if ( /^CHANGE_MODE=\"(\w)\"$/ ) {
+		      $CHANGE_MODE=$1;
+		      last SWITCH;
+		  }
+		  print "incorrect line in config file $CONFIG_FILE : $_";
+		  $mode_stop=1;
+	      }
+	    }
+    }
+}
+else {
+    $mode_gen=1;
+}
+
+
+# check the command line
+
+$i=0;
+while ($ARGV[$i]) { 
+
+  SWITCH: {      # a bit grouik
+      # zap -c because it was analyzed first
+      if ($ARGV[$i] =~ /^-c$|^--config-file$/) { 
+	  $i++;
+	  last SWITCH; 
+      }
+      # command line only options
+      if ($ARGV[$i] =~ /^-V$|^--version$/) {
+	  $mode_version = 1;
+	  last SWITCH;
+      }
+      if ($ARGV[$i] =~ /^-h$|^--help$/) {
+	  $mode_help = 1;
+	  last SWITCH;
+      }
+      if ($ARGV[$i] =~ /^-v|^--verbose$/) {
+	  $mode_verbose = 1;
+	  last SWITCH;
+      }
+      if ($ARGV[$i] =~ /^-g|^--generate-config-file$/) {
+	  $mode_gen = 1;
+	  last SWITCH;
+      }
+      if ($ARGV[$i] =~ /^-G|^--generate-config-file-here$/) {
+	  if ($ARGV[$i+1]) {
+	      $CONFIG_FILE=$ARGV[$i+1];
+	      $mode_gen = 1;
+	  }
+	  else {
+	      print "$ARGV[$i] : you must specify an argument\n";
+	      $mode_help=1;
+	  }
+	  $i++;
+	  last SWITCH;
+      }
+      # common options (exist in CONFIG_FILE)
+      if ($ARGV[$i] =~ /^-i$|^--interface$/) {
+	  if ($ARGV[$i+1]) {
+	      $INTERFACE=$ARGV[$i+1];
+	  }
+	  else {
+	      print "$ARGV[$i] : you must specify an argument";
+	      $mode_help=1;
+	  }
+	  $i++;
+	  last SWITCH;
+      }
+      if ($ARGV[$i] =~ /^-d$|^--if-down$/) {
+	  if ($ARGV[$i+1]) {
+	      $IF_DOWN=$ARGV[$i+1];
+	  }
+	  else {
+	      print "$ARGV[$i] : you must specify an argument";
+	      $mode_help=1;
+	  }
+	  $i++;
+	  last SWITCH;
+      }
+      if ($ARGV[$i] =~ /^-R$|^--reconnect-command$/) {
+	  if ($ARGV[$i+1]) {
+	      $RECONNECT_COMMAND=$ARGV[$i+1];
+	  }
+	  else {
+	      print "$ARGV[$i] : you must specify an argument";
+	      $mode_help=1;
+	  }
+	  $i++;
+	  last SWITCH;
+      }
+      if ($ARGV[$i] =~ /^-o$|^--ifconfig-output-pattern$/) {
+	  if ($ARGV[$i+1]) {
+	      $IFCONFIG_OUTPUT_PATTERN=$ARGV[$i+1];
+	  }
+	  else {
+	      print "$ARGV[$i] : you must specify an argument";
+	      $mode_help=1;
+	  }
+	  $i++;
+	  last SWITCH;
+      }
+
+      if ($ARGV[$i] =~ /^-I$|^--interval$/) {
+	  if ($ARGV[$i+1]) {
+	      $INTERVAL=$ARGV[$i+1];
+	  }
+	  else {
+	      print "$ARGV[$i] : you must specify an argument";
+	      $mode_help=1;
+	  }
+	  $i++;
+	  last SWITCH;
+      }
+      if ($ARGV[$i] =~ /^-l$|^--long-interval$/) {
+	  if ($ARGV[$i+1]) {
+	      $LONG_INTERVAL=$ARGV[$i+1];
+	  }
+	  else {
+	      print "$ARGV[$i] : you must specify an argument";
+	      $mode_help=1;
+	  }
+	  $i++;
+	  last SWITCH;
+      }
+      if ($ARGV[$i] =~ /^-e$|^--reconnect-interval$/) {
+	  if ($ARGV[$i+1]) {
+	      $RECONNECT_INTERVAL=$ARGV[$i+1];
+	  }
+	  else {
+	      print "$ARGV[$i] : you must specify an argument";
+	      $mode_help=1;
+	  }
+	  $i++;
+	  last SWITCH;
+      }
+
+      if ($ARGV[$i] =~ /^-r$|^--replace-pattern$/) {
+	  if ($ARGV[$i+1]) {
+	      $REPLACE_PATTERN=$ARGV[$i+1];
+	  }
+	  else {
+	      print "$ARGV[$i] : you must specify an argument";
+	      $mode_help=1;
+	  }
+	  $i++;
+	  last SWITCH;
+      }
+      if ($ARGV[$i] =~ /^-T$|^--template$/) {
+	  if ($ARGV[$i+1]) {
+	      $TEMPLATE=$ARGV[$i+1];
+	  }
+	  else {
+	      print "$ARGV[$i] : you must specify an argument";
+	      $mode_help=1;
+	  }
+	  $i++;
+	  last SWITCH;
+      }
+      if ($ARGV[$i] =~ /^-f$|^--target-file$/) {
+	  if ($ARGV[$i+1]) {
+	      $TARGET_FILE=$ARGV[$i+1];
+	  }
+	  else {
+	      print "$ARGV[$i] : you must specify an argument";
+	      $mode_help=1;
+	  }
+	  $i++;
+	  last SWITCH;
+      }
+
+      if ($ARGV[$i] =~ /^-p$|^--pre-change-command$/) {
+	  if ($ARGV[$i+1]) {
+	      $PRE_CHANGE_COMMAND=$ARGV[$i+1];
+	  }
+	  else {
+	      print "$ARGV[$i] : you must specify an argument";
+	      $mode_help=1;
+	  }
+	  $i++;
+	  last SWITCH;
+      }
+      if ($ARGV[$i] =~ /^-P$|^--post-change-command$/) {
+	  if ($ARGV[$i+1]) {
+	      $POST_CHANGE_COMMAND=$ARGV[$i+1];
+	  }
+	  else {
+	      print "$ARGV[$i] : you must specify an argument";
+	      $mode_help=1;
+	  }
+	  $i++;
+	  last SWITCH;
+      }
+
+      if ($ARGV[$i] =~ /^-C$|^--path-to-ifconfig$/) {
+	  if ($ARGV[$i+1]) {
+	      $PATH_TO_IFCONFIG=$ARGV[$i+1];
+	  }
+	  else {
+	      print "$ARGV[$i] : you must specify an argument";
+	      $mode_help=1;
+	  }
+	  $i++;
+	  last SWITCH;
+      }
+      if ($ARGV[$i] =~ /^-s$|^--path-to-sleep$/) {
+	  if ($ARGV[$i+1]) {
+	      $PATH_TO_SLEEP=$ARGV[$i+1];
+	  }
+	  else {
+	      print "$ARGV[$i] : you must specify an argument";
+	      $mode_help=1;
+	  }
+	  $i++;
+	  last SWITCH;
+      }
+
+      if ($ARGV[$i] =~ /^-t$|^--tmp-file$/) {
+	  if ($ARGV[$i+1]) {
+	      $TMP_FILE=$ARGV[$i+1];
+	  }
+	  else {
+	      print "$ARGV[$i] : you must specify an argument";
+	      $mode_help=1;
+	  }
+	  $i++;
+	  last SWITCH;
+      }
+
+      if ($ARGV[$i] =~ /^-m$|^--change-mode$/) {
+	  if ($ARGV[$i+1]) {
+	      $CHANGE_MODE=$ARGV[$i+1];
+	  }
+	  else {
+	      print "$ARGV[$i] : you must specify an argument";
+	      $mode_help=1;
+	  }
+	  $i++;
+	  last SWITCH;
+      }
+      print "invalid argument : $ARGV[$i]\n";
+      $mode_help=1;
+  }
+
+    $i++;
+}
+
+# check the presence of the tools ifconfig and sleep
+
+unless (-e $PATH_TO_IFCONFIG) {
+    print "error : cannot find ifconfig at '$PATH_TO_IFCONFIG'\n";
+    $mode_stop=1;
+}
+
+unless (-e $PATH_TO_SLEEP) {
+    print "error : cannot find sleep at '$PATH_TO_SLEEP'\n";
+    $mode_stop=1;
+}
+
+# check if EUID is root
+
+if ($>) {
+    print "error : only root can run $PROGNAME ! \n";
+    $mode_stop=1;
+}
+
+}
+
+# ----------------
+# |  FUNCTIONS   |
+# | print_config |
+# |              |
+# ----------------
+
+sub print_config() {
+    print "mode ".($mode_stop+$mode_version*2 + $mode_help*4 + $mode_verbose*8)."\n";
+    print "using CONFIG_FILE : '$CONFIG_FILE'\n";
+    
+    print "using INTERFACE : '$INTERFACE'\n";
+    print "using IF_DOWN : '$IF_DOWN'\n";
+    print "using RECONNECT_COMMAND : '$RECONNECT_COMMAND'\n";
+    print "using IFCONFIG_OUTPUT_PATTERN : '$IFCONFIG_OUTPUT_PATTERN'\n";
+
+    print "using INTERVAL : '$INTERVAL'\n";
+    print "using LONG_INTERVAL : '$LONG_INTERVAL'\n";
+    print "using RECONNECT_INTERVAL : '$RECONNECT_INTERVAL'\n";
+    
+    print "using REPLACE_PATTERN : '$REPLACE_PATTERN'\n";
+    print "using TEMPLATE : '$TEMPLATE'\n";
+    print "using TARGET_FILE : '$TARGET_FILE'\n";
+
+    print "using PRE_CHANGE_COMMAND : '$PRE_CHANGE_COMMAND'\n";
+    print "using POST_CHANGE_COMMAND : '$POST_CHANGE_COMMAND'\n";
+    
+    print "using PATH_TO_IFCONFIG : '$PATH_TO_IFCONFIG'\n";
+    print "using PATH_TO_SLEEP : '$PATH_TO_SLEEP'\n";
+    
+    print "using TMP_FILE : '$TMP_FILE'\n";
+    
+    print "using CHANGE_MODE : '$CHANGE_MODE'\n";
+}
+
+
+# --------------
+# | FUNCTIONS  |
+# | print_help |
+# |            |
+# --------------
+
+sub print_help() {
+    print "Survey a network interface and execute commands when IP changes\n\n";
+    print "usage : $PROGNAME  [-c <path>] [-C <path>] [-d <s|r|c>] [-e <delay>]\n";
+    print "[-f <path>] [-g] [-G <path>] [-h ] [-i <interface>] [-I <delay>] [-l <delay>]\n";
+    print "[-m <c|r|m>] [-o <pattern>] [-p <command>] [-P <command>] [-r <pattern>]\n";
+    print "[-R <command>] [-s <path>] [-t <path>] [-T <pattern>] [-v] [-V]\n\n"; 
+
+
+    print "$PROGNAME can be use both with command line arguments and config file.\n";
+    print "Use $PROGNAME -g to generate a default config file.\n\n"; 
+
+    print "Command line options : \n"; 
+    print "       -c | --config-file <path> : use this file instead of /etc/$PROGNAME.conf\n"; 
+    print "       -C | --path-to-ifconfig <path> : specify the path to ifconfig\n"; 
+    print "       -d | --if-down <s|r|c> : specify the action when the interface is down\n"; 
+    print "                       s : stop $PROGNAME\n";
+    print "                       r : reconnect interface with the reconnect-command (-R)\n";
+    print "                       c : continue\n";
+    print "       -e | --reconnect-interval <delay> : time to wait after reconnect\n"; 
+    print "       -f | --target-file <path> : file to modify when IP changes\n"; 
+    print "       -g | --generate-config-file : generate a default config file in\n";
+    print "                       /etc/$PROGNAME.conf\n"; 
+    print "       -G | --generate-config-file-here <path> : generate a default config file\n"; 
+    print "                       at <path>\n"; 
+    print "       -h | --help : print this help\n"; 
+    print "       -i | --interface <interface> : survey this interface\n"; 
+    print "       -I | --interval <delay> : wait <delay> seconds between each ifconfig\n"; 
+    print "       -l | --long-interval <delay> : wait <delay seconds> after an IP change\n"; 
+    print "       -m | --change-mode <c|r|m> : set the change mode of target file\n"; 
+    print "                       c : Create new target file with template and replace\n";
+    print "                           replace-pattern by new IP\n";
+    print "                       r : Replace all occurence of the old IP in target file\n";
+    print "                           the new IP\n";
+    print "                       m : Modify target file by replacing replace-pattern by\n";
+    print "                           the new IP\n";
+    print "       -o | --ifconfig-output-pattern <pattern> : pattern which permit to get\n";
+    print "                       the IP adress in the second line of an ifconfig ouput\n"; 
+    print "       -p | --pre-change-command <command> : command to execute before changing\n"; 
+    print "                       the target file.\n"; 
+    print "       -P | --post-change-command <command> : command to execute after changing\n"; 
+    print "                       the target file.\n"; 
+    print "       -r | --replace-pattern <pattern> : Pattern to be replaced in the template\n"; 
+    print "                       or the target file\n"; 
+    print "       -R | --reconnect-command <command> : command to execute when the\n";
+    print "                        interface is down\n"; 
+    print "       -s | --path-to-sleep <path> : specify the path to sleep\n"; 
+    print "       -t | --tmp-file <path> : temporary file to use insted of /tmp/$PROGNAME\n"; 
+    print "       -T | --template <pattern> : template used to create the target file in \n";
+    print "                       create mode\n"; 
+    print "       -v | --verbose : set the verbose mode, useful to debug\n"; 
+    print "       -V | --version : print the version of $PROGNAME\n";
+    print "\nConfig file options : \n"; 
+    print "       CHANGE_MODE=\"\"\n";
+    print "             set the change mode of target file\n"; 
+    print "               c : Create new target file with template and replace\n";
+    print "                   replace-pattern by new IP\n";
+    print "               r : Replace all occurences of the old IP in target file by the \n";
+    print "                   new IP\n";
+    print "               m : Modify target file by replacing replace-pattern by the new IP\n";
+    print "       IF_DOWN=\"\"\n";
+    print "             specify the action when the interface is down\n"; 
+    print "               s : stop $PROGNAME\n";
+    print "               r : reconnect interface with the reconnect-command (-R)\n";
+    print "               c : continue\n";
+    print "       IFCONFIG_OUTPUT_PATTERN=\"\"\n";
+    print "             pattern which permit to get the IP adress in the second line of an\n";
+    print "             ifconfig ouput\n";
+    print "       INTERFACE=\"\"\n";
+    print "             survey this interface\n";
+    print "       INTERVAL=\"\"\n"; 
+    print "             wait this delay between each ifconfig\n";
+    print "       LONG_INTERVAL=\"\"\n";
+    print "             wait this delay after an IP change\n";
+    print "       PATH_TO_IFCONFIG=\"\"\n";
+    print "             specify the path to ifconfig\n"; 
+    print "       PATH_TO_SLEEP=\"\"\n";
+    print "             specify the path to sleep\n";
+    print "       PRE_CHANGE_COMMAND=\"\"\n";
+    print "             command to execute before changing the target file\n"; 
+    print "       POST_CHANGE_COMMAND=\"\"\n";
+    print "             command to execute after changing the target file\n"; 
+    print "       RECONNECT_COMMAND=\"\"\n";
+    print "             command to execute when the interface is down\n";
+    print "       RECONNECT_INTERVAL=\"\"\n";
+    print "             command to execute when the interface is down\n";
+    print "       REPLACE_PATTERN=\"\"\n";
+    print "             pattern to be replaced in the template or the target file\n";
+    print "       TARGET_FILE=\"\"\n";
+    print "             file to modify when IP changes\n";
+    print "       TEMPLATE=\"\"\n";
+    print "             template used to create the target file in create mode\n";
+    print "       TMP_FILE=\"\"\n";
+    print "             temporary file to use insted of /tmp/$PROGNAME\n"; 
+    print "\n";
+}
+
+# -----------------
+# |   FUNCTIONS   |
+# | gen_conf_file |
+# |               |
+# -----------------
+
+sub gen_conf_file() {
+    print "generating default config file '$CONFIG_FILE'\n";
+    open (CONFIG_FILE,">$CONFIG_FILE") || die "error: cannot create config file $CONFIG_FILE";
+    print CONFIG_FILE "# $PROGNAME $VERSION default config file\n\n";
+    
+    print CONFIG_FILE "INTERFACE=\"$INTERFACE\"\n";
+    print CONFIG_FILE "IF_DOWN=\"$IF_DOWN\"\n";
+    print CONFIG_FILE "RECONNECT_COMMAND=\"$RECONNECT_COMMAND\"\n";
+    print CONFIG_FILE "IFCONFIG_OUTPUT_PATTERN=\"$IFCONFIG_OUTPUT_PATTERN\"\n";
+
+    print CONFIG_FILE "INTERVAL=\"$INTERVAL\"\n";
+    print CONFIG_FILE "LONG_INTERVAL=\"$LONG_INTERVAL\"\n";
+    print CONFIG_FILE "RECONNECT_INTERVAL=\"$RECONNECT_INTERVAL\"\n";
+    
+    print CONFIG_FILE "REPLACE_PATTERN=\"$REPLACE_PATTERN\"\n";
+    print CONFIG_FILE "TEMPLATE=\"$TEMPLATE\"\n";
+    print CONFIG_FILE "TARGET_FILE=\"$TARGET_FILE\"\n";
+    
+    print CONFIG_FILE "PRE_CHANGE_COMMAND=\"$PRE_CHANGE_COMMAND\"\n";
+    print CONFIG_FILE "POST_CHANGE_COMMAND=\"$POST_CHANGE_COMMAND\"\n";
+    
+    print CONFIG_FILE "PATH_TO_IFCONFIG=\"$PATH_TO_IFCONFIG\"\n";
+    print CONFIG_FILE "PATH_TO_SLEEP=\"$PATH_TO_SLEEP\"\n";
+    
+    print CONFIG_FILE "TMP_FILE=\"$TMP_FILE\"\n";
+
+    print CONFIG_FILE "CHANGE_MODE=\"$CHANGE_MODE\"\n";
+    close(CONFIG_FILE);
+}
+
+
+# ----------------
+# |  FUNCTIONS   |
+# | print_header |
+# |              |
+# ----------------
+
+sub print_header() {
+    print "$PROGNAME version $VERSION\n"; 
+}
+
+
+# -------------
+# | FUNCTIONS |
+# | main loop |
+# |           |
+# -------------
+
+sub main_loop() {
+
+    my $old_ip="empty";
+    my $new_ip="empty";
+    my $line="";
+
+    # infinite loop
+    for (;;) {
+
+	# check if the interface has changed
+	system "$PATH_TO_IFCONFIG >$TMP_FILE" || \
+	    die ("cannot find ifconfig") ;
+
+	open (TMP_FILE,$TMP_FILE) || die "cannot open $TMP_FILE for reading\n";
+	
+	$line="";
+	while (<TMP_FILE>) {
+	    if (/$INTERFACE/) {
+		$line=<TMP_FILE>;		
+	    }
+	}
+
+	# close the file
+	close (TMP_FILE);
+
+	# check if INTERFACE is up
+	if ($line eq "") { # interface is down;
+	    if ($mode_verbose) { 
+		print "Interface $INTERFACE is down : "; 
+		if ($IF_DOWN eq "s") { print "exit..."};
+		if ($IF_DOWN eq "r") { print "reconnect..."};
+		if ($IF_DOWN eq "c") { print "continue..."};
+		print "\n";
+	    } 
+
+	    if ($IF_DOWN eq "s") { die "error : interface $INTERFACE is down\n" };
+	    if ($IF_DOWN eq "r") { 
+		print("$RECONNECT_COMMAND \n");
+		system("$RECONNECT_COMMAND"); # || die "error while reconnecting interface $INTERFACE";
+		system "$PATH_TO_SLEEP $RECONNECT_INTERVAL" || \
+		    die ("cannot find sleep\n") ;		
+	    };
+	}
+	else { # interface is up;
+	    # check and get the new IP
+	    unless ($line =~ $IFCONFIG_OUTPUT_PATTERN) { die "incorrect ifconfig output\n"; }
+	    $new_ip=$1;
+
+	    # compare with the old value
+	    if ($old_ip eq "empty") {
+		# first ifconfig : do nothing
+		if ($mode_verbose) { print "$INTERFACE : $new_ip\n"; }
+	    } else {
+		
+		if ($old_ip eq $new_ip) {
+		    # same IP : do nothing
+		    if ($mode_verbose) { print "$INTERFACE : $old_ip == $new_ip\n"; }
+		} else {
+		# different IP : run commands
+		    if ($mode_verbose) { print "$INTERFACE : $old_ip \>\> $new_ip\n"; }
+		    
+		    # pre change command
+		    if ($PRE_CHANGE_COMMAND) { 
+			system "$PRE_CHANGE_COMMAND" || \
+			    die "error : cannot run $PRE_CHANGE_COMMAND";}
+		    
+		    # IP change mode CREATE
+		    if ($CHANGE_MODE eq "c") {
+			$line = $TEMPLATE; 
+			$line =~ s/$REPLACE_PATTERN/$new_ip/g ;
+			open (TARGET_FILE,">$TARGET_FILE") || die "cannot open $TARGET_FILE for writing\n";
+			print TARGET_FILE "$line";
+			close TARGET_FILE;
+		    }
+		
+		    # IP change mode REPLACE
+		    if ($CHANGE_MODE eq "r") {
+
+			# !!! Error !!! #
+			system ("cp -f $TARGET_FILE $TMP_FILE") || die "cannot copy $TARGET_FILE on $TMP_FILE\n";
+			# !!! Error !!! #
+
+			open (TARGET_FILE,"$>TARGET_FILE") || die "cannot open $TARGET_FILE for writing\n";
+			open (TMP_FILE,"$TMP_FILE") || die "cannot open $TMP_FILE for reading\n";
+			while (<TMP_FILE>) {
+			    s/$old_ip/$new_ip/g;
+			    print TARGET_FILE;
+			}
+			close TARGET_FILE;
+			close TMP_FILE;
+		    }
+		
+		    # IP change mode MODIFY
+		    if ($CHANGE_MODE eq "m") {
+
+			# !!! Error !!! #
+			system ("cp -f $TARGET_FILE $TMP_FILE") || die "cannot copy $TARGET_FILE on $TMP_FILE\n";
+			# !!! Error !!! #
+
+			open (TARGET_FILE,">$TARGET_FILE") || die "cannot open $TARGET_FILE for reading\n";
+			open (TMP_FILE,"$TMP_FILE") || die "cannot open $TMP_FILE for writing\n";
+			while (<TMP_FILE>) {
+			    s/$REPLACE_PATTERN/$new_ip/g;
+			    print TARGET_FILE;
+			}
+			close TARGET_FILE;
+			close TMP_FILE;
+		    }
+		
+		    # post change command
+		    if ($POST_CHANGE_COMMAND) { 
+		    system "$POST_CHANGE_COMMAND" || \
+			die "error : cannot run $POST_CHANGE_COMMAND";}
+		    
+		    system "$PATH_TO_SLEEP $LONG_INTERVAL" || \
+			die ("cannot find sleep\n") ;
+		}
+	    }
+	}
+
+	system "$PATH_TO_SLEEP $INTERVAL" || \
+	    die ("cannot find sleep\n") ;
+
+	$old_ip=$new_ip;
+    }
+}
+
+
+# --------
+# |      |
+# | MAIN |
+# |      |
+# --------
+
+load_default();
+
+init();
+
+unless ($mode_stop) {
+    
+    if ($mode_version || $mode_verbose || $mode_help) { print_header(); }
+
+    if ($mode_verbose) { print_config(); }
+
+    if ($mode_help) { print_help(); }
+    else {
+	if ($mode_gen) { gen_conf_file(); }
+	else { main_loop(); }
+    }
+}
